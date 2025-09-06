@@ -7,4 +7,4 @@ A simple multiplayer shooter game demo built with **Node.js**, **Express**, and 
 1. Clone the repo:
    ```bash
    git clone https://github.com/your-username/multiplayer-shooter.git
-   cd multiplayer-shooter
+   cd multiplayer-shooter 
