@@ -1,13 +1,179 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
 <head>
-  <title>Multiplayer Shooter</title>
-  <script src="/socket.io/socket.io.js"></script>
-  <script>
-    var socket = io();
-  </script>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Multiplayer Shooter — Huge Map</title>
+  <style>
+    html,body { height:100%; margin:0; background:#0b0f14; color:#eee; font-family: system-ui, Roboto, Arial; }
+    #ui { position:fixed; left:12px; top:12px; z-index:50; background: rgba(0,0,0,0.5); padding:10px; border-radius:8px; }
+    canvas { display:block; width:100vw; height:100vh; }
+    #chat { position:fixed; left:12px; bottom:12px; z-index:60; width:320px; max-height:180px; overflow:auto; background:rgba(0,0,0,0.45); padding:8px; border-radius:8px; font-size:13px;}
+  </style>
 </head>
 <body>
-  <h1>Welcome to the Shooter Game</h1>
+  <div id="ui">
+    <div><strong>Multiplayer Shooter — Huge Map</strong></div>
+    <div id="status">Connecting...</div>
+    <div style="font-size:12px;opacity:.85">WASD move • Mouse aim • Hold mouse to auto-fire • Space dash</div>
+  </div>
+  <div id="chat"></div>
+  <canvas id="canvas"></canvas>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+  (function(){
+    const WORLD_W = 60000, WORLD_H = 40000;
+    const socket = io();
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const status = document.getElementById('status');
+    const chatEl = document.getElementById('chat');
+
+    // dynamic resize
+    function resize() { canvas.width = innerWidth * devicePixelRatio; canvas.height = innerHeight * devicePixelRatio; }
+    addEventListener('resize', resize); resize();
+
+    // local state
+    const local = { x: WORLD_W/2, y: WORLD_H/2, dir:0, hp:100, fireCooldown:0 };
+    let others = {}; // id -> { interpX, interpY, x, y, dir, hp }
+    let bullets = [];
+
+    // input
+    const keys = {};
+    const mouse = { x:innerWidth/2, y:innerHeight/2, down:false };
+    addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+    addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+    canvas.addEventListener('mousemove', e => {
+      const r = canvas.getBoundingClientRect();
+      mouse.x = (e.clientX - r.left);
+      mouse.y = (e.clientY - r.top);
+    });
+    canvas.addEventListener('mousedown', () => mouse.down = true);
+    canvas.addEventListener('mouseup', () => mouse.down = false);
+
+    // chat input (quick inline)
+    const input = document.createElement('input');
+    input.style.position = 'fixed'; input.style.left = '12px'; input.style.bottom = '200px';
+    input.style.zIndex = 70; input.style.width='260px'; input.placeholder='Type / enter to chat';
+    document.body.appendChild(input);
+    input.addEventListener('keydown', (e)=> {
+      if (e.key === 'Enter' && input.value.trim()) {
+        socket.emit('chat', input.value.trim()); input.value = '';
+      }
+    });
+    socket.on('chat', m => {
+      const d = document.createElement('div'); d.textContent = m.name + ': ' + m.text; chatEl.appendChild(d); chatEl.scrollTop = chatEl.scrollHeight;
+    });
+
+    socket.on('connect', () => status.textContent = 'Connected. Spawning...'; socket.emit('spawn', {}));
+    socket.on('spawned', s => { local.x = s.x; local.y = s.y; local.hp = s.hp; status.textContent = 'Spawned: ' + s.id.slice(0,6); });
+
+    socket.on('snapshot', snap => {
+      // update others and bullets
+      bullets = snap.bullets || [];
+      // map players
+      const newOthers = {};
+      (snap.players||[]).forEach(p => {
+        if (p.id === socket.id) { local.x = p.x; local.y = p.y; local.hp = p.hp; local.dir = p.dir; return; }
+        if (!others[p.id]) newOthers[p.id] = { interpX: p.x, interpY: p.y, x: p.x, y: p.y, dir: p.dir, hp: p.hp, name: p.name };
+        else newOthers[p.id] = Object.assign({ interpX: others[p.id].interpX, interpY: others[p.id].interpY }, p);
+      });
+      others = newOthers;
+    });
+
+    function update(dt) {
+      // movement
+      const speed = 380;
+      let dx = (keys['d']?1:0) - (keys['a']?1:0);
+      let dy = (keys['s']?1:0) - (keys['w']?1:0);
+      const mag = Math.hypot(dx, dy) || 1;
+      dx /= mag; dy /= mag;
+      local.x = Math.max(0, Math.min(WORLD_W, local.x + dx * speed * dt));
+      local.y = Math.max(0, Math.min(WORLD_H, local.y + dy * speed * dt));
+
+      // aim
+      const vw = canvas.width / devicePixelRatio, vh = canvas.height / devicePixelRatio;
+      const camX = local.x - vw/2, camY = local.y - vh/2;
+      const aimX = mouse.x + camX, aimY = mouse.y + camY;
+      local.dir = Math.atan2(aimY - local.y, aimX - local.x);
+
+      // fire
+      local.fireCooldown -= dt;
+      if (mouse.down && local.fireCooldown <= 0) {
+        local.fireCooldown = 0.12;
+        socket.emit('input', { x: local.x, y: local.y, dir: local.dir, fire: true, speed: 900 });
+      } else {
+        socket.emit('input', { x: local.x, y: local.y, dir: local.dir });
+      }
+
+      // interpolate others
+      for (const id in others) {
+        const p = others[id];
+        if (p.interpX === undefined) { p.interpX = p.x; p.interpY = p.y; }
+        p.interpX += (p.x - p.interpX) * Math.min(1, dt * 10);
+        p.interpY += (p.y - p.interpY) * Math.min(1, dt * 10);
+      }
+    }
+
+    function render() {
+      const vw = canvas.width / devicePixelRatio, vh = canvas.height / devicePixelRatio;
+      const camX = local.x - vw/2, camY = local.y - vh/2;
+
+      ctx.save(); ctx.scale(1/devicePixelRatio, 1/devicePixelRatio);
+      // background
+      ctx.fillStyle = '#0b0f14'; ctx.fillRect(0,0, vw, vh);
+
+      // chunk grid
+      const CH = 600;
+      for (let gx = Math.floor(camX/CH)*CH; gx < camX + vw + CH; gx += CH) {
+        for (let gy = Math.floor(camY/CH)*CH; gy < camY + vh + CH; gy += CH) {
+          const hash = Math.abs(Math.sin((gx*123.456+gy*78.9)*0.0001));
+          ctx.fillStyle = hash>0.5 ? '#0f1720' : '#101621';
+          ctx.fillRect(Math.floor(gx-camX), Math.floor(gy-camY), CH, CH);
+        }
+      }
+
+      // bullets
+      ctx.fillStyle = '#ff7b7b';
+      for (const b of bullets) {
+        const bx = b.x - camX, by = b.y - camY;
+        ctx.beginPath(); ctx.arc(bx, by, 4, 0, Math.PI*2); ctx.fill();
+      }
+
+      // other players
+      for (const id in others) {
+        const p = others[id];
+        const px = p.interpX - camX, py = p.interpY - camY;
+        ctx.save(); ctx.translate(px, py); ctx.rotate(p.dir || 0);
+        ctx.fillStyle = '#9ca3af'; ctx.fillRect(-12,-8,24,16); ctx.restore();
+        ctx.fillStyle = 'white'; ctx.fillText((p.name||id.slice(0,6)) + ' ' + Math.round(p.hp||100), px-12, py-18);
+      }
+
+      // local player at center
+      ctx.save(); ctx.translate(vw/2, vh/2); ctx.rotate(local.dir);
+      ctx.fillStyle = '#e5e7eb'; ctx.fillRect(-15,-10,30,20);
+      ctx.fillStyle = '#9ca3af'; ctx.fillRect(0,-4,16,8);
+      ctx.restore();
+
+      // HUD
+      ctx.fillStyle = 'white'; ctx.fillText('HP: ' + Math.round(local.hp||100), 10, 20);
+      ctx.fillText('Pos: ' + Math.round(local.x) + ',' + Math.round(local.y), 10, 36);
+
+      ctx.restore();
+    }
+
+    // main loop
+    let last = performance.now();
+    function loop(t) {
+      const dt = Math.min(0.1, (t-last)/1000); last = t;
+      update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+    requestAnimationFrame(loop);
+
+  })();
+  </script>
 </body>
 </html>
